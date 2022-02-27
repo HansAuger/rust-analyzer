@@ -4,6 +4,8 @@
 //! so `TextEdit` is the ultimate representation of the work done by
 //! rust-analyzer.
 
+use itertools::Itertools;
+use std::cmp::Ordering;
 pub use text_size::{TextRange, TextSize};
 
 /// `InsertDelete` -- a single "atomic" change to text
@@ -14,6 +16,22 @@ pub struct Indel {
     pub insert: String,
     /// Refers to offsets in the original text
     pub delete: TextRange,
+}
+
+impl PartialOrd for Indel {
+    fn partial_cmp(&self, other: &Indel) -> Option<Ordering> {
+        if self == other {
+            return Some(Ordering::Equal);
+        }
+        let cmp_to_other = self.delete.end() <= other.delete.start();
+        let cmp_to_self = other.delete.end() <= self.delete.start();
+        match (cmp_to_other, cmp_to_self) {
+            (true, true) => None,
+            (true, false) => Some(Ordering::Less),
+            (false, true) => Some(Ordering::Greater),
+            (false, false) => None,
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -42,6 +60,10 @@ impl Indel {
         let start: usize = self.delete.start().into();
         let end: usize = self.delete.end().into();
         text.replace_range(start..end, &self.insert);
+    }
+
+    fn eq_insert_at_offset(&self, other: &Indel) -> bool {
+        self.delete.start() == other.delete.end() && self.delete.end() == other.delete.start()
     }
 }
 
@@ -109,9 +131,8 @@ impl TextEdit {
     }
 
     pub fn union(&mut self, other: TextEdit) -> Result<(), TextEdit> {
-        // FIXME: can be done without allocating intermediate vector
-        let mut all = self.iter().chain(other.iter()).collect::<Vec<_>>();
-        if !check_disjoint_and_sort(&mut all) {
+        let mut iter_merge = self.iter().merge(other.iter());
+        if !check_disjoint(&mut iter_merge) {
             return Err(other);
         }
 
@@ -185,17 +206,28 @@ impl TextEditBuilder {
     }
 }
 
-fn assert_disjoint_or_equal(indels: &mut [Indel]) {
+fn assert_disjoint_or_equal(indels: &mut Vec<Indel>) {
     assert!(check_disjoint_and_sort(indels));
 }
-// FIXME: Remove the impl Bound here, it shouldn't be needed
-fn check_disjoint_and_sort(indels: &mut [impl std::borrow::Borrow<Indel>]) -> bool {
-    indels.sort_by_key(|indel| (indel.borrow().delete.start(), indel.borrow().delete.end()));
-    indels.iter().zip(indels.iter().skip(1)).all(|(l, r)| {
-        let l = l.borrow();
-        let r = r.borrow();
-        l.delete.end() <= r.delete.start() || l == r
-    })
+
+fn check_disjoint_and_sort(indels: &mut Vec<Indel>) -> bool {
+    indels.sort_by_key(|indel| (indel.delete.start(), indel.delete.end()));
+    return check_disjoint(&mut indels.iter());
+}
+
+fn check_disjoint<'a, I>(indels: &mut I) -> bool
+where
+    I: std::iter::Iterator<Item = &'a Indel>,
+{
+    if let Some(indel) = indels.next() {
+        let mut indel = indel;
+        return indels.all(|right_indel| {
+            let check = indel <= right_indel || indel.eq_insert_at_offset(&right_indel);
+            indel = right_indel;
+            return check;
+        });
+    }
+    true
 }
 
 #[cfg(test)]
@@ -228,6 +260,22 @@ mod tests {
         builder.delete(range(13, 17));
 
         let edit2 = builder.finish();
+        assert!(edit1.union(edit2).is_ok());
+        assert_eq!(edit1.indels.len(), 3);
+    }
+
+    #[test]
+    fn test_union_with_duplicates() {
+        let mut builder1 = TextEditBuilder::default();
+        builder1.delete(range(7, 11));
+        builder1.delete(range(13, 17));
+
+        let mut builder2 = TextEditBuilder::default();
+        builder2.delete(range(1, 5));
+        builder2.delete(range(13, 17));
+
+        let mut edit1 = builder1.finish();
+        let edit2 = builder2.finish();
         assert!(edit1.union(edit2).is_ok());
         assert_eq!(edit1.indels.len(), 3);
     }
