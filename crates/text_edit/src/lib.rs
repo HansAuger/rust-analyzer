@@ -5,7 +5,7 @@
 //! rust-analyzer.
 
 use itertools::Itertools;
-use std::cmp::Ordering;
+use std::cmp::{max, Ordering};
 pub use text_size::{TextRange, TextSize};
 
 /// `InsertDelete` -- a single "atomic" change to text
@@ -114,12 +114,14 @@ impl TextEdit {
 
         let text_size = TextSize::of(&*text);
         let mut total_len = text_size.clone();
+        let mut max_total_len = text_size.clone();
         for indel in &self.indels {
             total_len += TextSize::of(&indel.insert);
             total_len -= indel.delete.len();
+            max_total_len = max(max_total_len, total_len);
         }
 
-        if let Some(additional) = total_len.checked_sub(text_size.into()) {
+        if let Some(additional) = max_total_len.checked_sub(text_size.into()) {
             text.reserve(additional.into());
         }
 
